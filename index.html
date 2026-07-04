@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>崩れる書 — Crumbling Calligraphy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@600;800&family=Zen+Old+Mincho:wght@400&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #0a0908; }
+  body { font-family: "Zen Old Mincho", "Hiragino Mincho ProN", "Yu Mincho", serif; }
+  #stage { position: fixed; inset: 0; touch-action: none; cursor: crosshair; }
+
+  .caption {
+    position: fixed; left: 24px; bottom: 26px; z-index: 5;
+    color: #b7a888; pointer-events: none;
+    display: flex; align-items: baseline; gap: 14px;
+    opacity: 0; transition: opacity 2.4s ease;
+  }
+  .caption.show { opacity: 1; }
+  .caption .kanji-name { font-size: 15px; letter-spacing: 0.5em; color: #d9c8a3; }
+  .caption .reading { font-size: 10.5px; letter-spacing: 0.28em; color: #6f6551; text-transform: lowercase; }
+
+  .title {
+    position: fixed; top: 26px; left: 24px; z-index: 5;
+    writing-mode: vertical-rl; pointer-events: none;
+    color: #55503f; font-size: 11px; letter-spacing: 0.55em;
+  }
+  .title::after {
+    content: ""; display: block; width: 1px; height: 34px;
+    background: linear-gradient(#55503f, transparent);
+    margin-top: 14px; margin-right: 5px;
+  }
+
+  .seal {
+    position: fixed; right: 24px; bottom: 26px; z-index: 5;
+    width: 30px; height: 30px; border: 1px solid rgba(199,62,46,0.75);
+    border-radius: 3px; display: grid; place-items: center;
+    color: rgba(199,62,46,0.9); font-size: 13px; font-weight: 600;
+    font-family: "Shippori Mincho B1", serif; pointer-events: none;
+    transform: rotate(-2deg);
+  }
+
+  .hint {
+    position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);
+    z-index: 5; color: #5a5442; font-size: 10px; letter-spacing: 0.4em;
+    pointer-events: none; opacity: 0; transition: opacity 1.6s ease;
+    white-space: nowrap; padding-left: 0.4em;
+  }
+  .hint.show { opacity: 0.85; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div class="title">崩れる書</div>
+<div class="caption" id="caption">
+  <span class="kanji-name" id="cName"></span>
+  <span class="reading" id="cRead"></span>
+</div>
+<div class="hint" id="hint">文字に触れると崩れます</div>
+<div class="seal">印</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const captionEl = document.getElementById('caption');
+  const cName = document.getElementById('cName');
+  const cRead = document.getElementById('cRead');
+  const hintEl = document.getElementById('hint');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let W, H, DPR;
+  function resize() {
+    DPR = Math.min(devicePixelRatio || 1, 2);
+    W = innerWidth; H = innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = '#0a0908'; ctx.fillRect(0, 0, W, H);
+  }
+  resize();
+  addEventListener('resize', () => { resize(); retarget(); });
+
+  const CHARS = [
+    { k: '風', r: 'kaze · wind' },
+    { k: '花', r: 'hana · blossom' },
+    { k: '雪', r: 'yuki · snow' },
+    { k: '月', r: 'tsuki · moon' },
+    { k: '夢', r: 'yume · dream' },
+    { k: '光', r: 'hikari · light' },
+    { k: '海', r: 'umi · sea' },
+    { k: '舞', r: 'mai · dance' },
+  ];
+
+  // ---- glyph sampling ----
+  function sampleGlyph(ch) {
+    const size = 340;
+    const oc = document.createElement('canvas');
+    oc.width = size; oc.height = size;
+    const octx = oc.getContext('2d', { willReadFrequently: true });
+    octx.fillStyle = '#000'; octx.fillRect(0, 0, size, size);
+    octx.fillStyle = '#fff';
+    octx.font = `800 ${size * 0.82}px "Shippori Mincho B1","Hiragino Mincho ProN","Yu Mincho",serif`;
+    octx.textAlign = 'center'; octx.textBaseline = 'middle';
+    octx.fillText(ch, size / 2, size * 0.54);
+    const data = octx.getImageData(0, 0, size, size).data;
+
+    const pts = [];
+    const step = 3;
+    for (let y = 0; y < size; y += step) {
+      for (let x = 0; x < size; x += step) {
+        const a = data[(y * size + x) * 4];
+        if (a > 128) pts.push({ x: x / size, y: y / size });
+      }
+    }
+    return pts;
+  }
+
+  // ---- palette ----
+  function pickColor() {
+    const r = Math.random();
+    if (r < 0.045) return { c: [199, 74, 52], glow: 1.0 };   // 朱 vermilion spark
+    if (r < 0.42)  return { c: [217, 179, 106], glow: 0.9 }; // gold
+    if (r < 0.72)  return { c: [239, 230, 208], glow: 0.7 }; // unbleached white
+    return { c: [168, 148, 108], glow: 0.55 };               // dim gold-gray
+  }
+
+  // ---- particles ----
+  const COUNT = Math.min(5200, Math.max(2600, Math.floor((W * H) / 320)));
+  const P = [];
+  for (let i = 0; i < COUNT; i++) {
+    const col = pickColor();
+    P.push({
+      x: Math.random() * W, y: Math.random() * H,
+      vx: 0, vy: 0, tx: 0, ty: 0,
+      free: true, released: true,
+      delay: 0, relT: 0,
+      size: 0.6 + Math.random() * 1.5,
+      c: col.c, glow: col.glow,
+      a: 0.25 + Math.random() * 0.55,
+      seed: Math.random() * 1000,
+      fade: 1,
+    });
+  }
+
+  // glyph placement box
+  let box = {};
+  function computeBox() {
+    const s = Math.min(W, H) * 0.62;
+    box = { x: (W - s) / 2, y: (H - s) / 2 - H * 0.02, s };
+  }
+  computeBox();
+
+  let charIdx = 0;
+  let glyphPts = [];
+
+  function assignTargets() {
+    computeBox();
+    glyphPts = sampleGlyph(CHARS[charIdx].k);
+    // shuffle-ish sampling so pool maps evenly
+    for (let i = 0; i < P.length; i++) {
+      const g = glyphPts[(i * 7919) % glyphPts.length];
+      const p = P[i];
+      const jit = 1.6;
+      p.tx = box.x + g.x * box.s + (Math.random() - 0.5) * jit;
+      p.ty = box.y + g.y * box.s + (Math.random() - 0.5) * jit;
+      p.free = false; p.released = false;
+      p.delay = Math.random() * 1.6;
+      p.fade = 1;
+    }
+  }
+  function retarget() { if (state !== 'CRUMBLE') assignTargets(); }
+
+  // ---- flow field ----
+  function field(x, y, t) {
+    const s = 0.0016;
+    const a = Math.sin(x * s * 1.3 + t * 0.32) + Math.cos(y * s * 1.7 - t * 0.21);
+    const b = Math.sin((x + y) * s * 0.8 + t * 0.13);
+    return (a + b) * 1.35;
+  }
+
+  // ---- pointer ----
+  const ptr = { x: -9999, y: -9999, down: false };
+  function setPtr(e) {
+    const t = e.touches ? e.touches[0] : e;
+    ptr.x = t.clientX; ptr.y = t.clientY;
+  }
+  addEventListener('pointermove', setPtr, { passive: true });
+  addEventListener('pointerdown', e => {
+    setPtr(e); ptr.down = true;
+    // tap on the glyph area during HOLD → crumble now
+    if (state === 'HOLD' &&
+        ptr.x > box.x - 30 && ptr.x < box.x + box.s + 30 &&
+        ptr.y > box.y - 30 && ptr.y < box.y + box.s + 30) {
+      startCrumble();
+    }
+  });
+  addEventListener('pointerup', () => { ptr.down = false; });
+  addEventListener('pointerleave', () => { ptr.x = -9999; ptr.y = -9999; });
+
+  // ---- state machine ----
+  let state = 'GATHER';
+  let stateT = 0;
+  const HOLD_TIME = reduced ? 12 : 6.5;
+  const CRUMBLE_TIME = reduced ? 8 : 5.2;
+
+  function startCrumble() {
+    state = 'CRUMBLE'; stateT = 0;
+    hintEl.classList.remove('show');
+    captionEl.classList.remove('show');
+    // release from the bottom upward, eroding like sand
+    let minY = Infinity, maxY = -Infinity;
+    for (const p of P) { if (p.ty < minY) minY = p.ty; if (p.ty > maxY) maxY = p.ty; }
+    const span = Math.max(1, maxY - minY);
+    for (const p of P) {
+      const fromBottom = (maxY - p.ty) / span; // 0 at bottom
+      p.relT = fromBottom * 2.6 + Math.random() * 0.7;
+      p.released = false;
+    }
+  }
+
+  function nextChar() {
+    charIdx = (charIdx + 1) % CHARS.length;
+    assignTargets();
+    state = 'GATHER'; stateT = 0;
+  }
+
+  function showCaption() {
+    cName.textContent = CHARS[charIdx].k;
+    cRead.textContent = CHARS[charIdx].r;
+    captionEl.classList.add('show');
+  }
+
+  let hintShown = false;
+
+  // ---- main loop ----
+  assignTargets();
+  let last = performance.now();
+  let T = 0;
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now; T += dt; stateT += dt;
+
+    // trails
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(10,9,8,0.20)';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalCompositeOperation = 'lighter';
+
+    const breathe = Math.sin(T * 1.4) * 0.35;
+
+    for (let i = 0; i < P.length; i++) {
+      const p = P[i];
+
+      // pointer repulsion (always)
+      const dx = p.x - ptr.x, dy = p.y - ptr.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < 12100) {
+        const d = Math.sqrt(d2) || 1;
+        const f = (110 - d) / 110 * (ptr.down ? 340 : 170);
+        p.vx += (dx / d) * f * dt;
+        p.vy += (dy / d) * f * dt;
+      }
+
+      if (state === 'GATHER' || state === 'HOLD') {
+        if (stateT > p.delay) {
+          // spring toward target
+          const ax = (p.tx - p.x) * 9 - p.vx * 4.4;
+          const ay = (p.ty - p.y) * 9 - p.vy * 4.4;
+          p.vx += ax * dt; p.vy += ay * dt;
+          // shimmer while holding
+          if (state === 'HOLD') {
+            p.vx += Math.sin(T * 2 + p.seed) * 1.1 * dt * (1 + breathe);
+            p.vy += Math.cos(T * 1.7 + p.seed) * 1.1 * dt;
+          }
+        } else {
+          // drift with the field until called
+          const a = field(p.x, p.y, T);
+          p.vx += Math.cos(a) * 26 * dt; p.vy += Math.sin(a) * 26 * dt;
+          p.vx *= 0.985; p.vy *= 0.985;
+        }
+        p.fade = Math.min(1, p.fade + dt * 0.8);
+      } else { // CRUMBLE
+        if (!p.released && stateT > p.relT) p.released = true;
+        if (p.released) {
+          const a = field(p.x, p.y, T);
+          p.vx += Math.cos(a) * 42 * dt;
+          p.vy += Math.sin(a) * 30 * dt + 34 * dt; // gravity: ash falls
+          p.vx *= 0.995; p.vy *= 0.995;
+          p.fade = Math.max(0.12, p.fade - dt * 0.16);
+        } else {
+          // still part of the character: hold with slight tremble
+          const ax = (p.tx - p.x) * 9 - p.vx * 4.4;
+          const ay = (p.ty - p.y) * 9 - p.vy * 4.4;
+          p.vx += ax * dt + (Math.random() - 0.5) * 8 * dt;
+          p.vy += ay * dt;
+        }
+      }
+
+      p.x += p.vx * dt; p.y += p.vy * dt;
+
+      // wrap softly
+      if (p.x < -20) p.x = W + 18; if (p.x > W + 20) p.x = -18;
+      if (p.y > H + 24) { p.y = -14; p.x = Math.random() * W; }
+      if (p.y < -30) p.y = H + 20;
+
+      // draw
+      const tw = 0.75 + 0.25 * Math.sin(T * 3 + p.seed * 4);
+      const alpha = p.a * p.fade * tw * p.glow;
+      ctx.fillStyle = `rgba(${p.c[0]},${p.c[1]},${p.c[2]},${alpha})`;
+      const s = p.size;
+      ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+      // occasional glow halo for bright sparks
+      if (p.glow >= 0.9 && (i & 15) === 0) {
+        ctx.fillStyle = `rgba(${p.c[0]},${p.c[1]},${p.c[2]},${alpha * 0.14})`;
+        ctx.fillRect(p.x - s * 2, p.y - s * 2, s * 4, s * 4);
+      }
+    }
+
+    // state transitions
+    if (state === 'GATHER' && stateT > 3.4) {
+      state = 'HOLD'; stateT = 0;
+      showCaption();
+      if (!hintShown) { hintEl.classList.add('show'); hintShown = true; }
+    } else if (state === 'HOLD' && stateT > HOLD_TIME) {
+      startCrumble();
+    } else if (state === 'CRUMBLE' && stateT > CRUMBLE_TIME) {
+      nextChar();
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  // wait briefly for the webfont so glyph sampling uses the right face
+  const start = () => { assignTargets(); requestAnimationFrame(frame); };
+  if (document.fonts && document.fonts.ready) {
+    Promise.race([
+      document.fonts.load('800 100px "Shippori Mincho B1"').then(() => document.fonts.ready),
+      new Promise(r => setTimeout(r, 1200)),
+    ]).then(start);
+  } else start();
+})();
+</script>
+</body>
+</html>
